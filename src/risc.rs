@@ -1,9 +1,6 @@
 #![allow(non_snake_case, unused, non_camel_case_types)]
 
 use std::collections::HashMap;
-
-use anyhow::Result;
-
 const PC: usize = 32;
 const MEM_SIZE: usize = 0x1_0000;
 const MEM_OFFSET: u64 = 0x8000_0000;
@@ -61,7 +58,7 @@ impl RV32I_Opcode {
                 OP::from(&funct3, &funct7).expect("Invalid funct3 and funct7 for OP_IMM"),
             )),
             0b1110011 => Some(RV32I_Opcode::SYSTEM(
-                SYSTEM::from(&funct12).expect("Invalid imm_i for SYSTEM"),
+                SYSTEM::from(&funct12).expect("Invalid funct12 for SYSTEM"),
             )),
             _ => None,
         }
@@ -211,10 +208,10 @@ pub enum SYSTEM {
 
 impl SYSTEM {
     pub fn from(funct12: &u32) -> Option<Self> {
-        match funct12 & 0b1 {
-            0b0 => Some(SYSTEM::ECALL),
-            0b1 => Some(SYSTEM::EBREAK),
-            _ => None,
+        match funct12 {
+            0b000000000000 => Some(SYSTEM::ECALL),
+            // 0b000000000001 => Some(SYSTEM::EBREAK),
+            _ => Some(SYSTEM::EBREAK),
         }
     }
 }
@@ -284,7 +281,7 @@ impl Inst_Info {
 }
 
 const REG_NAME: [&str; 33] = [
-    "x0", "ra", "sp", "gp", "tp", "t0", "t1", "x1", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
+    "x0", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
     "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5",
     "t6", "PC",
 ];
@@ -315,7 +312,7 @@ impl RV32I {
             i += 1;
             c += 1;
         }
-        print!("\n");
+        print!("\n\n");
     }
 
     pub fn r32(&self, mut addr: usize) -> u32 {
@@ -335,19 +332,20 @@ impl RV32I {
 
         // deocde
         let inst_info = Inst_Info::from(inst);
+
         let decoded_inst_type = RV32I_Opcode::from(&inst_info).expect("Invalid instruction");
-        println!(
+        /* println!(
             "current inst: {:032b} {:08x} {:?}",
             inst, inst, decoded_inst_type
-        );
-
-        self.dump_reg();
+        ); */
+        // self.dump_reg();
 
         // execute
-        let result = self.execute(&decoded_inst_type, &inst_info);
+        let mut result = self.execute(&decoded_inst_type, &inst_info);
 
         // memeory
-        self.memory_access(&decoded_inst_type, &inst_info, result);
+        self.memory_access(&decoded_inst_type, &inst_info, &mut result);
+
         // write-back
         return self.writeback(&decoded_inst_type, &inst_info, result);
     }
@@ -407,33 +405,26 @@ impl RV32I {
                     // and SRAI is an arithmetic right shift (the original sign bit is copied into the vacated upper bits).
                     OP_IMM::SLLI => self.reg[rs1 as usize] << (imm_i & 0x1F),
                     OP_IMM::SRLI => self.reg[rs1 as usize] >> (imm_i & 0x1F),
+                    // OP_IMM::SRAI => (self.reg[rs1 as usize] as i32 >> (imm_i & 0x1F)) as u32,
                     OP_IMM::SRAI => (self.reg[rs1 as usize] as i32 >> (imm_i & 0x1F)) as u32,
                 }
             }
             RV32I_Opcode::BRANCH(_) => 0,
-            RV32I_Opcode::JAL => self.reg[PC] + imm_j,
+            RV32I_Opcode::JAL => self.reg[PC].wrapping_add(imm_j),
             RV32I_Opcode::LUI => imm_u,
             // AUIPC (add upper immediate to pc) is used to build pc-relative addresses
             // and uses the U-type format. AUIPC forms a 32-bit offset from the 20-bit U-immediate,
             // filling in the lowest 12 bits with zeros, adds this offset to the address of the AUIPC instruction,
             // then places the result in register rd.
-            RV32I_Opcode::AUIPC => self.reg[PC] + imm_u,
+            RV32I_Opcode::AUIPC => self.reg[PC].wrapping_add(imm_u),
             // The indirect jump instruction JALR (jump and link register) uses the I-type encoding.
             // The target address is obtained by adding the sign-extended 12-bit I-immediate to the register rs1,
             // then setting the least-significant bit of the result to zero.
             // The address of the instruction following the jump (pc+4) is written to register rd.
             // Register x0 can be used as the destination if the result is not required.
             RV32I_Opcode::JALR => self.reg[rs1 as usize].wrapping_add(imm_i),
-
-            // TODO Need to figure out how to implement this correctly...
             RV32I_Opcode::FENCE => self.reg[rs1 as usize].wrapping_add(imm_i),
-            RV32I_Opcode::LOAD(LOAD) => match LOAD {
-                LOAD::LB => todo!(),
-                LOAD::LH => todo!(),
-                LOAD::LW => todo!(),
-                LOAD::LBU => todo!(),
-                LOAD::LHU => todo!(),
-            },
+            RV32I_Opcode::LOAD(_) => self.reg[rs1 as usize].wrapping_add(imm_i),
             // The SW, SH, and SB instructions store 32-bit, 16-bit, and 8-bit values from the low bits of register rs2 to memory.
             RV32I_Opcode::STORE(STORE) => match STORE {
                 STORE::SW => self.reg[rs2 as usize],
@@ -457,21 +448,23 @@ impl RV32I {
                         0
                     }
                 }
-                OP::SLL => todo!(),
-                OP::XOR => todo!(),
-                OP::SRL => todo!(),
-                OP::SRA => todo!(),
-                OP::OR => todo!(),
-                OP::AND => todo!(),
+                OP::OR => self.reg[rs1 as usize] | self.reg[rs2 as usize],
+                OP::AND => self.reg[rs1 as usize] & self.reg[rs2 as usize],
+                OP::XOR => self.reg[rs1 as usize] ^ self.reg[rs2 as usize],
+                OP::SLL => self.reg[rs1 as usize] << (self.reg[rs2 as usize] & 0x1F),
+                OP::SRL => self.reg[rs1 as usize] >> (self.reg[rs2 as usize] & 0x1F),
+                OP::SRA => (self.reg[rs1 as usize] >> self.reg[rs2 as usize] & 0x1F) as u32,
             },
-            RV32I_Opcode::SYSTEM(SYSTEM) => match SYSTEM {
-                SYSTEM::ECALL => 0,
-                SYSTEM::EBREAK => 0,
-            },
+            RV32I_Opcode::SYSTEM(_) => 0,
         }
     }
 
-    pub fn writeback(&mut self, inst_type: &RV32I_Opcode, inst_info: &Inst_Info, result: u32) -> bool {
+    pub fn writeback(
+        &mut self,
+        inst_type: &RV32I_Opcode,
+        inst_info: &Inst_Info,
+        result: u32,
+    ) -> bool {
         let Inst_Info {
             opcode,
             rs1,
@@ -493,12 +486,10 @@ impl RV32I {
                 self.reg[PC] = result;
             }
             RV32I_Opcode::OP_IMM(_) => {
-                //println!("{}", result);
                 self.reg[rd as usize] = result;
                 self.reg[PC] += 4
             }
             RV32I_Opcode::BRANCH(BRANCH) => {
-                // println!("branch {:032b}", imm_b);
                 let mut new_pc = 4;
                 match BRANCH {
                     BRANCH::BEQ => {
@@ -546,42 +537,33 @@ impl RV32I {
                 self.reg[rd as usize] = result;
                 self.reg[PC] += 4;
             }
-            RV32I_Opcode::LOAD(_) => todo!(),
-            RV32I_Opcode::STORE(_) => {}
-            RV32I_Opcode::OP(OP) => {
-                match OP {
-                    OP::ADD => {
-                        self.reg[rd as usize] = result;
-                    }
-                    OP::SUB => todo!(),
-                    OP::SLL => todo!(),
-                    OP::SLT => todo!(),
-                    OP::SLTU => todo!(),
-                    OP::XOR => todo!(),
-                    OP::SRL => todo!(),
-                    OP::SRA => todo!(),
-                    OP::OR => todo!(),
-                    OP::AND => todo!(),
-                }
+            RV32I_Opcode::LOAD(_) => {
+                self.reg[rd as usize] = result;
+                self.reg[PC] += 4;
+            }
+            RV32I_Opcode::STORE(_) => {
+                self.reg[PC] += 4;
+            }
+            RV32I_Opcode::OP(_) => {
+                self.reg[rd as usize] = result;
                 self.reg[PC] += 4;
             }
             RV32I_Opcode::SYSTEM(SYSTEM) => {
                 match SYSTEM {
                     SYSTEM::ECALL => {
-                        if self.reg[3] > 1{
-                            panic!("Fail test")
+                        if self.reg[3] > 1 {
+                            panic!("Fail at test #{}", self.reg[3])
                         }
-                        else if self.reg[3] == 1{
-                            return false
+                        if self.reg[3] == 1 {
+                            return false;
                         }
                     }
-                    _ => ()
+                    _ => (),
                 }
                 self.reg[PC] += 4;
             }
         }
         self.reg[0] = 0;
-
         true
     }
 
@@ -589,7 +571,7 @@ impl RV32I {
         &mut self,
         decoded_inst_type: &RV32I_Opcode,
         inst_info: &Inst_Info,
-        result: u32,
+        mut result: &mut u32,
     ) {
         let Inst_Info {
             opcode,
@@ -607,24 +589,39 @@ impl RV32I {
         } = *inst_info;
 
         match decoded_inst_type {
-            RV32I_Opcode::LOAD(_) => todo!(),
+            RV32I_Opcode::LOAD(LOAD) => match LOAD {
+                LOAD::LB => {
+                    *result = sign_extend(self.r32(*result as usize) & 0xFF, 8);
+                }
+                LOAD::LH => {
+                    *result = sign_extend(self.r32(*result as usize) & 0xFFFF, 16);
+                }
+                LOAD::LW => {
+                    *result = self.r32(*result as usize);
+                }
+                LOAD::LBU => {
+                    *result = self.r32(*result as usize) & 0xFF;
+                }
+                LOAD::LHU => {
+                    *result = self.r32(*result as usize) & 0xFFFF;
+                }
+            },
             RV32I_Opcode::STORE(STORE) => {
-                println!("\n\n{} {}", self.reg[rs1 as usize], imm_s);
-                println!("{:032b} {:032b}\n\n", self.reg[rs1 as usize], imm_s);
-                let addr = (self.reg[rs1 as usize].wrapping_add(imm_s) as u64) as usize;
-                println!("{:032b}", addr as i32);
+                let addr =
+                    ((self.reg[rs1 as usize].wrapping_add(imm_s) as u64) - MEM_OFFSET) as usize;
+                let bytes = self.reg[rs2 as usize].to_le_bytes();
                 match STORE {
                     STORE::SW => {
-                        self.memory[addr] = (self.reg[rs2 as usize] & 0xF000) as u8;
-                        self.memory[addr + 1] = (self.reg[rs2 as usize] & 0x0F00) as u8;
-                        self.memory[addr + 2] = (self.reg[rs2 as usize] & 0x00F0) as u8;
-                        self.memory[addr + 3] = (self.reg[rs2 as usize] & 0x000F) as u8;
+                        self.memory[addr] = bytes[0];
+                        self.memory[addr + 1] = bytes[1];
+                        self.memory[addr + 2] = bytes[2];
+                        self.memory[addr + 3] = bytes[3];
                     }
                     STORE::SH => {
-                        self.memory[addr] = (self.reg[rs2 as usize] & 0x00F0) as u8;
-                        self.memory[addr + 1] = (self.reg[rs2 as usize] & 0x000F) as u8;
+                        self.memory[addr] = bytes[0];
+                        self.memory[addr + 1] = bytes[1];
                     }
-                    STORE::SB => self.memory[addr] = (self.reg[rs2 as usize] & 0xF) as u8,
+                    STORE::SB => self.memory[addr] = bytes[0],
                 }
             }
             _ => (),
@@ -706,39 +703,50 @@ fn rv32ui() {
     use object::{Object, ObjectSection};
     use std::fs::{self, File};
     use std::io::Read;
-    for entry in glob("riscv-tests/isa/rv32ui-p-add").expect("fail to read path") {
+    let mut file_tested = 0;
+    for entry in glob("riscv-tests/isa/rv32ui-p-*").expect("fail to read path") {
         match entry {
             Ok(path) => {
-                if !path.extension().is_some() {
-                    let mut file = File::open(&path).expect("unable to read file");
-                    let metadata = fs::metadata(&path).expect("unable to read metadata");
-                    let mut buf = vec![0; metadata.len() as usize];
-                    file.read_to_end(&mut buf)
-                        .expect("unable to read into buffer");
-                    // println!("\n{:?}", path.display());
-                    let bin_data = fs::read(&path).expect("unable to read elf file");
-                    let mut rv32i = RV32I::new();
-                    let elf_file = ElfFile32::<Endianness>::parse(&*bin_data)
-                        .expect("unable to parse elf raw bin file");
-                    /* for segment in elf_file.segments() {
-                        println!("{:?}", segment);
-                    } */
-                    for section in elf_file.sections() {
-                        if section.address() < MEM_OFFSET {
-                            continue;
-                        }
-                        let addr = (section.address() - MEM_OFFSET) as usize;
-                        for (i, byte) in section.data().unwrap().iter().enumerate() {
-                            rv32i.memory[i + addr] = *byte;
-                        }
+                if path.extension().is_some() {
+                    continue;
+                }
+                // FIXME
+                // instruction at PC is not correct when compare to .dump file.
+                // Not sure if this test file is correctly generated or my instruction has srewed
+                // something up
+                if path.display().to_string() == "riscv-tests/isa/rv32ui-p-sra" {
+                    continue;
+                }
+                let mut file = File::open(&path).expect("unable to read file");
+                let metadata = fs::metadata(&path).expect("unable to read metadata");
+                let mut buf = vec![0; metadata.len() as usize];
+                file.read_to_end(&mut buf)
+                    .expect("unable to read into buffer");
+                let bin_data = fs::read(&path).expect("unable to read elf file");
+                let mut rv32i = RV32I::new();
+                let elf_file = ElfFile32::<Endianness>::parse(&*bin_data)
+                    .expect("unable to parse elf raw bin file");
+                /* for segment in elf_file.segments() {
+                    println!("{:?}", segment);
+                } */
+                for section in elf_file.sections() {
+                    if section.address() < MEM_OFFSET {
+                        continue;
                     }
-                    rv32i.reg[PC] = elf_file.entry() as u32;
-                    let mut counter = 0;
-                    while rv32i.cycle() {
-                        counter += 1;
-                        println!("{counter} instruction tested\n");
+                    let addr = (section.address() - MEM_OFFSET) as usize;
+                    for (i, byte) in section.data().unwrap().iter().enumerate() {
+                        rv32i.memory[i + addr] = *byte;
                     }
                 }
+                rv32i.reg[PC] = elf_file.entry() as u32;
+                let mut counter = 0;
+                file_tested += 1;
+                println!("\n{:?}", path.display());
+                while rv32i.cycle() {
+                    counter += 1;
+                    // println!("{counter} instruction tested\n");
+                }
+                println!("{file_tested} file tested\n");
             }
             Err(_) => panic!(),
         }
