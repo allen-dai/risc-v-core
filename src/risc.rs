@@ -1,12 +1,11 @@
-#![allow(non_snake_case, unused, non_camel_case_types)]
+#![allow(non_snake_case, non_camel_case_types)]
 
-use std::collections::HashMap;
 const PC: usize = 32;
 const MEM_SIZE: usize = 0x1_0000;
 const MEM_OFFSET: u64 = 0x8000_0000;
 
 #[derive(Debug)]
-pub enum RV32I_Opcode {
+pub enum Opcode {
     LUI,
     AUIPC,
     JAL,
@@ -20,44 +19,37 @@ pub enum RV32I_Opcode {
     SYSTEM(SYSTEM), // ECALL EBREAK
 }
 
-impl RV32I_Opcode {
-    pub fn from(inst_decode: &Inst_Info) -> Option<Self> {
-        let Inst_Info {
-            opcode,
-            rs1,
-            rs2,
-            rd,
-            imm_i,
-            imm_s,
-            imm_b,
-            imm_u,
-            imm_j,
+impl Opcode {
+    pub fn from(inst_decode: &Instruction) -> Option<Self> {
+        let Instruction {
+            opcode_bin,
             funct3,
             funct7,
             funct12,
+            ..
         } = inst_decode;
-        match opcode {
-            0b0110111 => Some(RV32I_Opcode::LUI),
-            0b0010111 => Some(RV32I_Opcode::AUIPC),
-            0b1101111 => Some(RV32I_Opcode::JAL),
-            0b1100111 => Some(RV32I_Opcode::JALR),
-            0b0001111 => Some(RV32I_Opcode::FENCE),
-            0b1100011 => Some(RV32I_Opcode::BRANCH(
+        match opcode_bin {
+            0b0110111 => Some(Opcode::LUI),
+            0b0010111 => Some(Opcode::AUIPC),
+            0b1101111 => Some(Opcode::JAL),
+            0b1100111 => Some(Opcode::JALR),
+            0b0001111 => Some(Opcode::FENCE),
+            0b1100011 => Some(Opcode::BRANCH(
                 BRANCH::from(&funct3).expect("Invalid funct3 for BRANCH"),
             )),
-            0b0000011 => Some(RV32I_Opcode::LOAD(
+            0b0000011 => Some(Opcode::LOAD(
                 LOAD::from(&funct3).expect("Invalid funct3 for LOAD"),
             )),
-            0b0100011 => Some(RV32I_Opcode::STORE(
+            0b0100011 => Some(Opcode::STORE(
                 STORE::from(&funct3).expect("Invalid funct3 for STORE"),
             )),
-            0b0010011 => Some(RV32I_Opcode::OP_IMM(
+            0b0010011 => Some(Opcode::OP_IMM(
                 OP_IMM::from(&funct3, &funct7).expect("Invalid funct3 and funct7 for OP_IMM"),
             )),
-            0b0110011 => Some(RV32I_Opcode::OP(
+            0b0110011 => Some(Opcode::OP(
                 OP::from(&funct3, &funct7).expect("Invalid funct3 and funct7 for OP_IMM"),
             )),
-            0b1110011 => Some(RV32I_Opcode::SYSTEM(
+            0b1110011 => Some(Opcode::SYSTEM(
                 SYSTEM::from(&funct12).expect("Invalid funct12 for SYSTEM"),
             )),
             _ => None,
@@ -217,8 +209,8 @@ impl SYSTEM {
 }
 
 #[derive(Debug)]
-pub struct Inst_Info {
-    opcode: u32,
+pub struct Instruction {
+    opcode_bin: u32,
     rs1: u32,
     rs2: u32,
     rd: u32,
@@ -232,9 +224,9 @@ pub struct Inst_Info {
     funct12: u32,
 }
 
-impl Inst_Info {
+impl Instruction {
     pub fn from(inst: u32) -> Self {
-        let opcode = extract_bits(6, 0, inst);
+        let opcode_bin = extract_bits(6, 0, inst);
         let funct7 = extract_bits(31, 25, inst);
         let rs2 = extract_bits(24, 20, inst);
         let rs1 = extract_bits(19, 15, inst);
@@ -264,7 +256,7 @@ impl Inst_Info {
         let funct12 = sign_extend(extract_bits(31, 20, inst), 12);
 
         Self {
-            opcode,
+            opcode_bin,
             rs1,
             rs2,
             rd,
@@ -328,110 +320,71 @@ impl RV32I {
     pub fn cycle(&mut self) -> bool {
         // fetch
         let addr = self.reg[PC] as usize;
-        let inst = self.r32(addr);
+        let inst_bin = self.r32(addr);
 
         // deocde
-        let inst_info = Inst_Info::from(inst);
-
-        let decoded_inst_type = RV32I_Opcode::from(&inst_info).expect("Invalid instruction");
+        let inst = Instruction::from(inst_bin);
+        let opcode = Opcode::from(&inst).expect("Invalid instruction");
         /* println!(
             "current inst: {:032b} {:08x} {:?}",
             inst, inst, decoded_inst_type
-        ); */
-        // self.dump_reg();
+        );
+        self.dump_reg(); */
 
         // execute
-        let mut result = self.execute(&decoded_inst_type, &inst_info);
+        let mut result = self.execute(&opcode, &inst);
 
         // memeory
-        self.memory_access(&decoded_inst_type, &inst_info, &mut result);
+        self.memory_access(&opcode, &inst, &mut result);
 
         // write-back
-        return self.writeback(&decoded_inst_type, &inst_info, result);
+        return self.writeback(&opcode, &inst, result);
     }
 
-    pub fn execute(&self, inst_type: &RV32I_Opcode, inst_info: &Inst_Info) -> u32 {
-        let Inst_Info {
-            opcode,
+    pub fn execute(&self, opcode: &Opcode, inst: &Instruction) -> u32 {
+        let Instruction {
             rs1,
             rs2,
-            rd,
             imm_i,
             imm_s,
-            imm_b,
             imm_u,
             imm_j,
-            funct3,
-            funct7,
-            funct12,
-        } = *inst_info;
+            ..
+        } = *inst;
 
-        match inst_type {
-            RV32I_Opcode::OP_IMM(OP_IMM) => {
-                match OP_IMM {
-                    // ADDI adds the sign-extended 12-bit immediate to register rs1.
-                    // Arithmetic overflow is ignored and the result is simply the low XLEN bits of the result.
-                    // ADDI rd, rs1, 0 is used to implement the MV rd, rs1 assembler pseudoinstruction.
-                    OP_IMM::ADDI => self.reg[rs1 as usize].wrapping_add(imm_i),
-                    // SLTI (set less than immediate) places the value 1 in register rd if register rs1 is less
-                    // than the sign- extended immediate when both are treated as signed numbers, else 0 is written to rd.
-                    // SLTIU is similar but compares the values as unsigned numbers
-                    // (i.e., the immediate is first sign-extended to XLEN bits then treated as an unsigned number).
-                    // Note, SLTIU rd, rs1, 1 sets rd to 1 if rs1 equals zero, otherwise sets rd to 0 (assembler pseudoinstruction SEQZ rd, rs).
-                    OP_IMM::SLTI => {
-                        if (self.reg[rs1 as usize] as i32) < (imm_i as i32) {
-                            1
-                        } else {
-                            0
-                        }
+        match opcode {
+            Opcode::OP_IMM(OP_IMM) => match OP_IMM {
+                OP_IMM::ADDI => self.reg[rs1 as usize].wrapping_add(imm_i),
+                OP_IMM::SLTI => {
+                    if (self.reg[rs1 as usize] as i32) < (imm_i as i32) {
+                        1
+                    } else {
+                        0
                     }
-                    OP_IMM::SLTIU => {
-                        if self.reg[rs1 as usize] < imm_i {
-                            1
-                        } else {
-                            0
-                        }
-                    }
-                    // ANDI, ORI, XORI are logical operations that perform bitwise AND, OR, and XOR
-                    // on register rs1 and the sign-extended 12-bit immediate and place the result in rd.
-                    // Note, XORI rd, rs1, -1 performs a bitwise logical inversion of register rs1 (assembler pseudoinstruction NOT rd, rs).
-                    OP_IMM::ANDI => self.reg[rs1 as usize] & imm_i,
-                    OP_IMM::ORI => self.reg[rs1 as usize] | imm_i,
-                    OP_IMM::XORI => self.reg[rs1 as usize] ^ imm_i,
-                    // Shifts by a constant are encoded as a specialization of the I-type format.
-                    // The operand to be shifted is in rs1, and the shift amount is encoded in the lower 5 bits of the I-immediate field.
-                    // The right shift type is encoded in bit 30. SLLI is a logical left shift (zeros are shifted into the lower bits);
-                    // SRLI is a logical right shift (zeros are shifted into the upper bits);
-                    // and SRAI is an arithmetic right shift (the original sign bit is copied into the vacated upper bits).
-                    OP_IMM::SLLI => self.reg[rs1 as usize] << (imm_i & 0x1F),
-                    OP_IMM::SRLI => self.reg[rs1 as usize] >> (imm_i & 0x1F),
-                    // OP_IMM::SRAI => (self.reg[rs1 as usize] as i32 >> (imm_i & 0x1F)) as u32,
-                    OP_IMM::SRAI => (self.reg[rs1 as usize] as i32 >> (imm_i & 0x1F)) as u32,
                 }
-            }
-            RV32I_Opcode::BRANCH(_) => 0,
-            RV32I_Opcode::JAL => self.reg[PC].wrapping_add(imm_j),
-            RV32I_Opcode::LUI => imm_u,
-            // AUIPC (add upper immediate to pc) is used to build pc-relative addresses
-            // and uses the U-type format. AUIPC forms a 32-bit offset from the 20-bit U-immediate,
-            // filling in the lowest 12 bits with zeros, adds this offset to the address of the AUIPC instruction,
-            // then places the result in register rd.
-            RV32I_Opcode::AUIPC => self.reg[PC].wrapping_add(imm_u),
-            // The indirect jump instruction JALR (jump and link register) uses the I-type encoding.
-            // The target address is obtained by adding the sign-extended 12-bit I-immediate to the register rs1,
-            // then setting the least-significant bit of the result to zero.
-            // The address of the instruction following the jump (pc+4) is written to register rd.
-            // Register x0 can be used as the destination if the result is not required.
-            RV32I_Opcode::JALR => self.reg[rs1 as usize].wrapping_add(imm_i),
-            RV32I_Opcode::FENCE => self.reg[rs1 as usize].wrapping_add(imm_i),
-            RV32I_Opcode::LOAD(_) => self.reg[rs1 as usize].wrapping_add(imm_i),
-            // The SW, SH, and SB instructions store 32-bit, 16-bit, and 8-bit values from the low bits of register rs2 to memory.
-            RV32I_Opcode::STORE(STORE) => match STORE {
-                STORE::SW => self.reg[rs2 as usize],
-                STORE::SH => self.reg[rs2 as usize] & 0xFF,
-                STORE::SB => self.reg[rs2 as usize] & 0xF,
+                OP_IMM::SLTIU => {
+                    if self.reg[rs1 as usize] < imm_i {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                OP_IMM::ANDI => self.reg[rs1 as usize] & imm_i,
+                OP_IMM::ORI => self.reg[rs1 as usize] | imm_i,
+                OP_IMM::XORI => self.reg[rs1 as usize] ^ imm_i,
+                OP_IMM::SLLI => self.reg[rs1 as usize] << (imm_i & 0x1F),
+                OP_IMM::SRLI => self.reg[rs1 as usize] >> (imm_i & 0x1F),
+                OP_IMM::SRAI => (self.reg[rs1 as usize] as i32 >> (imm_i & 0x1F)) as u32,
             },
-            RV32I_Opcode::OP(OP) => match OP {
+            Opcode::BRANCH(_) => 0,
+            Opcode::JAL => self.reg[PC].wrapping_add(imm_j),
+            Opcode::LUI => imm_u,
+            Opcode::AUIPC => self.reg[PC].wrapping_add(imm_u),
+            Opcode::JALR => self.reg[rs1 as usize].wrapping_add(imm_i),
+            Opcode::FENCE => self.reg[rs1 as usize].wrapping_add(imm_i),
+            Opcode::LOAD(_) => self.reg[rs1 as usize].wrapping_add(imm_i),
+            Opcode::STORE(_) => ((self.reg[rs1 as usize].wrapping_add(imm_s) as u64) - MEM_OFFSET ) as u32,
+            Opcode::OP(OP) => match OP {
                 OP::ADD => self.reg[rs1 as usize].wrapping_add(self.reg[rs2 as usize]),
                 OP::SUB => self.reg[rs1 as usize].wrapping_sub(self.reg[rs2 as usize]),
                 OP::SLT => {
@@ -453,43 +406,36 @@ impl RV32I {
                 OP::XOR => self.reg[rs1 as usize] ^ self.reg[rs2 as usize],
                 OP::SLL => self.reg[rs1 as usize] << (self.reg[rs2 as usize] & 0x1F),
                 OP::SRL => self.reg[rs1 as usize] >> (self.reg[rs2 as usize] & 0x1F),
-                OP::SRA => (self.reg[rs1 as usize] >> self.reg[rs2 as usize] & 0x1F) as u32,
+                OP::SRA => (self.reg[rs1 as usize] >> (self.reg[rs2 as usize] & 0x1F)) as u32,
             },
-            RV32I_Opcode::SYSTEM(_) => 0,
+            Opcode::SYSTEM(_) => 0,
         }
     }
 
     pub fn writeback(
         &mut self,
-        inst_type: &RV32I_Opcode,
-        inst_info: &Inst_Info,
+        opcode: &Opcode,
+        inst: &Instruction,
         result: u32,
     ) -> bool {
-        let Inst_Info {
-            opcode,
+        let Instruction {
             rs1,
             rs2,
             rd,
-            imm_i,
-            imm_s,
             imm_b,
-            imm_u,
-            imm_j,
-            funct3,
-            funct7,
-            funct12,
-        } = *inst_info;
+            ..
+        } = *inst;
 
-        match inst_type {
-            RV32I_Opcode::JAL | RV32I_Opcode::JALR => {
+        match opcode {
+            Opcode::JAL | Opcode::JALR => {
                 self.reg[rd as usize] = self.reg[PC] + 4;
                 self.reg[PC] = result;
             }
-            RV32I_Opcode::OP_IMM(_) => {
+            Opcode::OP_IMM(_) => {
                 self.reg[rd as usize] = result;
                 self.reg[PC] += 4
             }
-            RV32I_Opcode::BRANCH(BRANCH) => {
+            Opcode::BRANCH(BRANCH) => {
                 let mut new_pc = 4;
                 match BRANCH {
                     BRANCH::BEQ => {
@@ -525,30 +471,30 @@ impl RV32I {
                 }
                 self.reg[PC] = self.reg[PC].wrapping_add(new_pc);
             }
-            RV32I_Opcode::LUI => {
+            Opcode::LUI => {
                 self.reg[rd as usize] = result;
                 self.reg[PC] += 4;
             }
-            RV32I_Opcode::AUIPC => {
+            Opcode::AUIPC => {
                 self.reg[rd as usize] = result;
                 self.reg[PC] += 4;
             }
-            RV32I_Opcode::FENCE => {
+            Opcode::FENCE => {
                 self.reg[rd as usize] = result;
                 self.reg[PC] += 4;
             }
-            RV32I_Opcode::LOAD(_) => {
+            Opcode::LOAD(_) => {
                 self.reg[rd as usize] = result;
                 self.reg[PC] += 4;
             }
-            RV32I_Opcode::STORE(_) => {
+            Opcode::STORE(_) => {
                 self.reg[PC] += 4;
             }
-            RV32I_Opcode::OP(_) => {
+            Opcode::OP(_) => {
                 self.reg[rd as usize] = result;
                 self.reg[PC] += 4;
             }
-            RV32I_Opcode::SYSTEM(SYSTEM) => {
+            Opcode::SYSTEM(SYSTEM) => {
                 match SYSTEM {
                     SYSTEM::ECALL => {
                         if self.reg[3] > 1 {
@@ -569,27 +515,17 @@ impl RV32I {
 
     pub fn memory_access(
         &mut self,
-        decoded_inst_type: &RV32I_Opcode,
-        inst_info: &Inst_Info,
-        mut result: &mut u32,
+        opcode: &Opcode,
+        inst: &Instruction,
+        result: &mut u32,
     ) {
-        let Inst_Info {
-            opcode,
-            rs1,
+        let Instruction {
             rs2,
-            rd,
-            imm_i,
-            imm_s,
-            imm_b,
-            imm_u,
-            imm_j,
-            funct3,
-            funct7,
-            funct12,
-        } = *inst_info;
+            ..
+        } = *inst;
 
-        match decoded_inst_type {
-            RV32I_Opcode::LOAD(LOAD) => match LOAD {
+        match opcode {
+            Opcode::LOAD(LOAD) => match LOAD {
                 LOAD::LB => {
                     *result = sign_extend(self.r32(*result as usize) & 0xFF, 8);
                 }
@@ -606,9 +542,8 @@ impl RV32I {
                     *result = self.r32(*result as usize) & 0xFFFF;
                 }
             },
-            RV32I_Opcode::STORE(STORE) => {
-                let addr =
-                    ((self.reg[rs1 as usize].wrapping_add(imm_s) as u64) - MEM_OFFSET) as usize;
+            Opcode::STORE(STORE) => {
+                let addr = *result as usize;
                 let bytes = self.reg[rs2 as usize].to_le_bytes();
                 match STORE {
                     STORE::SW => {
@@ -661,7 +596,7 @@ fn extract_bits_test() {
 #[test]
 fn inst_decode_test() {
     let instruction = 0b1011_1001_1010_1010_1011_1010_0011_0011;
-    let inst = Inst_Info::from(instruction);
+    let inst = Instruction::from(instruction);
     let opcode = (instruction >> 0) & 0b01111111;
     let funct3 = (instruction >> 12) & 0b111;
     let rs1 = (instruction >> 15) & 0b11111;
@@ -670,33 +605,26 @@ fn inst_decode_test() {
     let rd = (instruction >> 7) & 0b11111;
     let imm_i_t = (instruction >> 20) & 0b111111111111;
     let imm_i = (inst.imm_i) & 0b111111111111;
-    let imm_s_t = ((instruction >> 25) & 0b111) | ((instruction >> 7) & 0b1111111);
     let imm_s = inst.imm_s & 0b111111111111;
     let imm_b = inst.imm_b & 0b1111111111111;
     let imm_u_t = (instruction >> 12) & 0b11111111111111111111;
     let imm_u = (inst.imm_u >> 12) & 0b11111111111111111111;
     let imm_j = (inst.imm_j) & 0b1111_1111_1111_1111_1111_1;
-    let imm_j_t = ((instruction >> 21) & 0b1111)
-        | ((instruction >> 20) & 0b1)
-        | ((instruction >> 12) & 0b11111111111)
-        | ((instruction >> 11) & 0b1);
     assert_eq!(inst.rd, rd);
     assert_eq!(inst.rs1, rs1);
     assert_eq!(inst.rs2, rs2);
-    assert_eq!(inst.opcode, opcode);
+    assert_eq!(inst.opcode_bin, opcode);
     assert_eq!(inst.funct7, funct7);
     assert_eq!(inst.funct3, funct3);
     assert_eq!(imm_i, imm_i_t);
     assert_eq!(imm_s, 0b1011_100_10100);
     assert_eq!(imm_b, 0b1001_1100_1010_0);
-    //println!("{:032b}\n{:032b}\n{:032b}", inst.imm_u, imm_u, imm_u_t);
     assert_eq!(imm_u, imm_u_t);
-    //println!("{:032b}\n{:032b}\n{:032b}", inst.imm_j, imm_j, 0b1_10101011_0_0111001101_0);
     assert_eq!(imm_j, 0b1_10101011_0_0111001101_0);
 }
 
 #[test]
-fn rv32ui() {
+fn rv32ui_p() {
     use glob::glob;
     use object::read::elf::*;
     use object::Endianness;
@@ -744,8 +672,8 @@ fn rv32ui() {
                 println!("\n{:?}", path.display());
                 while rv32i.cycle() {
                     counter += 1;
-                    // println!("{counter} instruction tested\n");
                 }
+                println!("{counter} instruction tested");
                 println!("{file_tested} file tested\n");
             }
             Err(_) => panic!(),
