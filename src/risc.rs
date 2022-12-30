@@ -47,7 +47,7 @@ impl Opcode {
                 OP_IMM::from(&funct3, &funct7).expect("Invalid funct3 and funct7 for OP_IMM"),
             )),
             0b0110011 => Some(Opcode::OP(
-                OP::from(&funct3, &funct7).expect("Invalid funct3 and funct7 for OP_IMM"),
+                OP::from(&funct3, &funct7).expect("Invalid funct3 and funct7 for OP"),
             )),
             0b1110011 => Some(Opcode::SYSTEM(
                 SYSTEM::from(&funct12).expect("Invalid funct12 for SYSTEM"),
@@ -673,7 +673,7 @@ fn rv32ui_p() {
                 while rv32i.cycle() {
                     counter += 1;
                 }
-                println!("{counter} instruction tested");
+                println!("{counter} instructions ran");
                 println!("{file_tested} file tested\n");
             }
             Err(_) => panic!(),
