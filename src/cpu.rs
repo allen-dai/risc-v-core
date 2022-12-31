@@ -3,6 +3,11 @@
 const PC: usize = 32;
 const MEM_SIZE: usize = 0x1_0000;
 const MEM_OFFSET: u64 = 0x8000_0000;
+const REG_NAME: [&str; 33] = [
+    "x0", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
+    "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5",
+    "t6", "PC",
+];
 
 #[derive(Debug)]
 pub enum Opcode {
@@ -272,19 +277,30 @@ impl Instruction {
     }
 }
 
-const REG_NAME: [&str; 33] = [
-    "x0", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
-    "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5",
-    "t6", "PC",
-];
+#[derive(Debug, Clone, Copy)]
+pub enum Xlen {
+    Bit32,
+    Bit64,
+}
+
+impl std::ops::Deref for Xlen {
+    type Target = u32;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Xlen::Bit32 => &32,
+            Xlen::Bit64 => &64,
+        }
+    }
+}
 
 #[derive(Debug)]
-pub struct RV32I {
+pub struct Cpu {
     pub(crate) memory: [u8; MEM_SIZE],
     pub(crate) reg: [u32; 33],
 }
 
-impl RV32I {
+impl Cpu {
     pub fn new() -> Self {
         Self {
             memory: [0; MEM_SIZE],
@@ -383,7 +399,9 @@ impl RV32I {
             Opcode::JALR => self.reg[rs1 as usize].wrapping_add(imm_i),
             Opcode::FENCE => self.reg[rs1 as usize].wrapping_add(imm_i),
             Opcode::LOAD(_) => self.reg[rs1 as usize].wrapping_add(imm_i),
-            Opcode::STORE(_) => ((self.reg[rs1 as usize].wrapping_add(imm_s) as u64) - MEM_OFFSET ) as u32,
+            Opcode::STORE(_) => {
+                ((self.reg[rs1 as usize].wrapping_add(imm_s) as u64) - MEM_OFFSET) as u32
+            }
             Opcode::OP(OP) => match OP {
                 OP::ADD => self.reg[rs1 as usize].wrapping_add(self.reg[rs2 as usize]),
                 OP::SUB => self.reg[rs1 as usize].wrapping_sub(self.reg[rs2 as usize]),
@@ -412,12 +430,7 @@ impl RV32I {
         }
     }
 
-    pub fn writeback(
-        &mut self,
-        opcode: &Opcode,
-        inst: &Instruction,
-        result: u32,
-    ) -> bool {
+    pub fn writeback(&mut self, opcode: &Opcode, inst: &Instruction, result: u32) -> bool {
         let Instruction {
             rs1,
             rs2,
@@ -513,16 +526,8 @@ impl RV32I {
         true
     }
 
-    pub fn memory_access(
-        &mut self,
-        opcode: &Opcode,
-        inst: &Instruction,
-        result: &mut u32,
-    ) {
-        let Instruction {
-            rs2,
-            ..
-        } = *inst;
+    pub fn memory_access(&mut self, opcode: &Opcode, inst: &Instruction, result: &mut u32) {
+        let Instruction { rs2, .. } = *inst;
 
         match opcode {
             Opcode::LOAD(LOAD) => match LOAD {
@@ -651,7 +656,7 @@ fn rv32ui_p() {
                 file.read_to_end(&mut buf)
                     .expect("unable to read into buffer");
                 let bin_data = fs::read(&path).expect("unable to read elf file");
-                let mut rv32i = RV32I::new();
+                let mut cpu = Cpu::new();
                 let elf_file = ElfFile32::<Endianness>::parse(&*bin_data)
                     .expect("unable to parse elf raw bin file");
                 /* for segment in elf_file.segments() {
@@ -663,14 +668,14 @@ fn rv32ui_p() {
                     }
                     let addr = (section.address() - MEM_OFFSET) as usize;
                     for (i, byte) in section.data().unwrap().iter().enumerate() {
-                        rv32i.memory[i + addr] = *byte;
+                        cpu.memory[i + addr] = *byte;
                     }
                 }
-                rv32i.reg[PC] = elf_file.entry() as u32;
+                cpu.reg[PC] = elf_file.entry() as u32;
                 let mut counter = 0;
                 file_tested += 1;
                 println!("\n{:?}", path.display());
-                while rv32i.cycle() {
+                while cpu.cycle() {
                     counter += 1;
                 }
                 println!("{counter} instructions ran");

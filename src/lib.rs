@@ -1,1 +1,1 @@
-pub mod risc;
+pub mod cpu;
